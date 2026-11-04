@@ -15,12 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Only amd64: the deployment host is x86_64.
           - arch: amd64
             platform: linux/amd64
             runner: ubuntu-24.04
-          - arch: arm64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -125,8 +123,8 @@ jobs:
         run: |
           shopt -s nullglob
           digests=(*)
-          if (( ${#digests[@]} != 2 )); then
-            echo "Expected AMD64 and ARM64 image digests" >&2
+          if (( ${#digests[@]} != 1 )); then
+            echo "Expected exactly one AMD64 image digest" >&2
             exit 1
           fi
           tags=()
@@ -140,4 +138,4 @@ jobs:
           docker buildx imagetools create "${tags[@]}" "${images[@]}"
           first_tag="$(jq -r '.tags[0]' <<< "$TAGS_JSON")"
           docker buildx imagetools inspect --raw "$first_tag" |
-            jq -e '[.manifests[].platform.architecture] | index("amd64") != null and index("arm64") != null'
+            jq -e '[.manifests[].platform.architecture] | index("amd64") != null'
