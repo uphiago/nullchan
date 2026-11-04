@@ -1,0 +1,12 @@
+nullchan.dev {
+	encode zstd gzip
+
+	reverse_proxy rustchan:8080 {
+		# Traffic arrives through Cloudflare. Replace any client-supplied
+		# forwarding headers with the visitor address Cloudflare reports.
+		header_up X-Forwarded-For {header.CF-Connecting-IP}
+		header_up X-Real-IP {header.CF-Connecting-IP}
+		header_up X-Forwarded-Proto https
+		header_up Host {host}
+	}
+}

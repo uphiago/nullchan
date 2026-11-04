@@ -1,0 +1,104 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [Container]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_sha:
+        description: "Full commit SHA whose sha-<SHA> image to deploy"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-ovh
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to OVH
+    # Only deploy after a successful Container build on main (or a manual dispatch).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    env:
+      DEPLOY_SHA: ${{ github.event.inputs.image_sha || github.event.workflow_run.head_sha }}
+      DEPLOY_DIR: rustchan
+    steps:
+      - name: Check out source (compose file)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Validate image SHA
+        run: |
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "DEPLOY_SHA is not a full commit SHA: '$DEPLOY_SHA'" >&2
+            exit 1
+          fi
+
+      - name: Install SSH key and host key
+        env:
+          SSH_KEY: ${{ secrets.OVH_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.OVH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Copy compose file to host
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "${OVH_USER}@${OVH_HOST}" \
+            "mkdir -p ~/${DEPLOY_DIR}"
+          scp -i ~/.ssh/deploy_key -o IdentitiesOnly=yes compose.yaml Caddyfile \
+            "${OVH_USER}@${OVH_HOST}:~/${DEPLOY_DIR}/"
+
+      - name: Pull image and recreate container
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+          IMAGE: ghcr.io/uphiago/rustchan:sha-${{ env.DEPLOY_SHA }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "${OVH_USER}@${OVH_HOST}" \
+            "cd ~/${DEPLOY_DIR} && RUSTCHAN_IMAGE='${IMAGE}' docker compose pull rustchan && RUSTCHAN_IMAGE='${IMAGE}' docker compose up -d --remove-orphans"
+
+      - name: Verify readiness
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "${OVH_USER}@${OVH_HOST}" '
+            cd ~/rustchan
+            for attempt in $(seq 1 30); do
+              # Checked through Caddy with TLS, the same path visitors use.
+              if curl -fsSk --resolve nullchan.dev:443:127.0.0.1 https://nullchan.dev/readyz >/dev/null; then
+                echo "rustchan ready"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "rustchan did not become ready" >&2
+            docker compose logs --tail=100 rustchan caddy >&2 || true
+            exit 1
+          '
+
+      - name: Clean up key material
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
