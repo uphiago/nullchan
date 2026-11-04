@@ -1,11 +1,7 @@
 name: CI
 
+# Manual only, to avoid spending runner minutes on every push or PR.
 on:
-  pull_request:
-    branches: [main, master]
-  push:
-    branches: [main, master]
-  merge_group:
   workflow_dispatch:
 
 permissions:
